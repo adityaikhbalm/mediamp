@@ -479,6 +479,19 @@ bool mpv_handle_t::unobserve_property(uint64_t reply_data) {
     return rc >= 0;
 }
 
+void mpv_handle_t::refresh_video_display_size() {
+    // Event-loop thread only. Reads the synchronous properties here so the render thread
+    // never has to (render.h: no lock/wait dependency from the render thread to the core).
+    std::lock_guard<std::mutex> handle_guard(handle_lock_);
+    if (!handle_) return;
+    int64_t width = 0, height = 0;
+    if (mpv_get_property(handle_, "dwidth", MPV_FORMAT_INT64, &width) < 0) width = 0;
+    if (mpv_get_property(handle_, "dheight", MPV_FORMAT_INT64, &height) < 0) height = 0;
+    const uint32_t w = width < 0 ? 0u : static_cast<uint32_t>(width);
+    const uint32_t h = height < 0 ? 0u : static_cast<uint32_t>(height);
+    video_display_size_.store((static_cast<uint64_t>(w) << 32) | h, std::memory_order_release);
+}
+
 bool mpv_handle_t::ensure_stream_protocol_registered() {
     CHECK_HANDLE()
     if (stream_protocol_registered_) {

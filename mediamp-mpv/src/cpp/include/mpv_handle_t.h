@@ -103,6 +103,29 @@ public:
     // Calls the Kotlin RenderUpdateListener (outside any native lock).
     void notify_render_update();
 
+    // Video display size (mpv dwidth/dheight: aspect-corrected, rotation-applied), queried
+    // on the event-loop thread when MPV_EVENT_VIDEO_RECONFIG fires and published to a single
+    // packed atomic here. Renderers read the snapshot on their hot path instead of calling
+    // the synchronous mpv_get_property(), which render.h forbids on the render thread (it
+    // would take a lock dependency on the mpv core and stall past the VO's 200 ms timeout
+    // during a seek flush). Packing width+height into one atomic keeps the pair consistent
+    // for readers (no torn width/height). 0 means "not known yet".
+    struct video_display_size_t {
+        int width = 0;
+        int height = 0;
+    };
+    video_display_size_t video_display_size() const {
+        const uint64_t packed = video_display_size_.load(std::memory_order_acquire);
+        return video_display_size_t{
+            static_cast<int>(packed >> 32),
+            static_cast<int>(packed & 0xFFFFFFFFu),
+        };
+    }
+    // Queries dwidth/dheight and publishes them. MUST be called from a thread that is
+    // allowed to call the (synchronous) mpv client API - the event-loop thread, never the
+    // render thread.
+    void refresh_video_display_size();
+
     struct seekable_stream_entry;
     struct seekable_stream_cookie;
 
@@ -149,6 +172,10 @@ private:
 
     std::thread event_thread_;
     std::atomic_bool event_loop_request_exit{false};
+    // Video display size, published on the event-loop thread (VIDEO_RECONFIG) and read by
+    // renderers on their own threads. One packed atomic (width << 32 | height) keeps the
+    // pair consistent for readers.
+    std::atomic<uint64_t> video_display_size_{0};
     bool stream_protocol_registered_ = false;
     std::mutex stream_registry_lock_;
     std::unordered_map<std::string, std::shared_ptr<seekable_stream_entry>> seekable_streams_;

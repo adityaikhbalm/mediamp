@@ -130,6 +130,12 @@ void mpv_handle_t::event_loop() {
                 event_property = (mpv_event_property *) event->data;
                 emit_property_change(env, this, event_property, listener);
                 break;
+            case MPV_EVENT_VIDEO_RECONFIG:
+                // Video changed in some way (resolution/pixel format/filters). Re-query the
+                // display size here on the event loop so renderers never call the
+                // synchronous mpv_get_property() from their own (render) thread.
+                refresh_video_display_size();
+                break;
             case MPV_EVENT_LOG_MESSAGE:
                 log_message = (mpv_event_log_message *) event->data;
                 emit_log_message(this, log_message);

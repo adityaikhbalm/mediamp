@@ -62,18 +62,9 @@ void *win_gl_get_proc_address(void *ctx, const char *name) {
     return context ? context->get_proc_address(name) : nullptr;
 }
 
-// mpv's display size of the current video track (dwidth/dheight: after aspect
-// correction and rotation), or 0x0 while no video is loaded. Must be called WITHOUT
-// the state mutex held: mpv may hold internal locks while invoking the update
-// callback, which takes that mutex.
-void query_video_display_size(mpv_handle *handle, int *out_width, int *out_height) {
-    int64_t width = 0, height = 0;
-    if (!handle || mpv_get_property(handle, "dwidth", MPV_FORMAT_INT64, &width) < 0) width = 0;
-    if (!handle || mpv_get_property(handle, "dheight", MPV_FORMAT_INT64, &height) < 0) height = 0;
-    // The packed frame state carries 14-bit dimensions.
-    *out_width = static_cast<int>(width < 0 ? 0 : (width > 0x3FFF ? 0x3FFF : width));
-    *out_height = static_cast<int>(height < 0 ? 0 : (height > 0x3FFF ? 0x3FFF : height));
-}
+// (The video display size is no longer queried here: mpv_handle_t refreshes it on the
+// event loop's MPV_EVENT_VIDEO_RECONFIG so the render thread never issues a synchronous
+// mpv_get_property, which render.h forbids on the render thread. See owner_.video_display_size().)
 
 // The largest aspect-correct size that fits the consumer's request without exceeding
 // the video's display size. Every readback byte scales with this area, so rendering a
@@ -403,16 +394,19 @@ void win_gl_renderer::render_thread_loop() {
             continue;
         }
 
-        // Refresh the cached video display size before acting on the wake-up: both
-        // the config target and the per-frame drift check depend on it, and mpv must
-        // not be queried while the state mutex is held (its update callback takes
-        // this mutex, possibly under mpv-internal locks).
-        lock.unlock();
-        int video_width = 0, video_height = 0;
-        query_video_display_size(owner_.mpv(), &video_width, &video_height);
-        lock.lock();
-        s->video_width = video_width;
-        s->video_height = video_height;
+        // Video display size comes from the event loop's snapshot, refreshed on
+        // MPV_EVENT_VIDEO_RECONFIG (mpv_handle_t::video_display_size()). The render thread
+        // must NOT call the synchronous mpv_get_property() itself: render.h forbids a
+        // lock/wait dependency from the render thread to the core, and during a seek flush
+        // the core lock is held while the VO waits for our render call, so a per-wake query
+        // stalls past mpv's 200 ms timeout and the frame is dropped. Reading the atomic
+        // snapshot is a plain load, always correct for track switches/rotation because the
+        // event loop refreshes it on every VIDEO_RECONFIG. 0 falls back to the consumer request.
+        {
+            const auto size = owner_.video_display_size();
+            s->video_width = size.width;
+            s->video_height = size.height;
+        }
 
         bool configured = false;
         if (s->config_pending) {
